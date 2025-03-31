@@ -19,13 +19,13 @@
 
 ## Installation
 
-1. **Clone the Repository**
+1.  **Clone the Repository**
    Open your terminal and run:
    ```bash
    git clone https://github.com/yourusername/RootQuantify.git
    cd RootQuantify
    ```
-2. **Install Dependencies**
+2.  **Install Dependencies**
    Use the provided requirements.txt file to install necessary libraries, Open your terminal and run:
    ```bash
    pip install -r requirements.txt
