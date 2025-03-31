@@ -21,7 +21,7 @@
 1.**Clone the Repository**
    Open your terminal and run:
    ```bash
-   git clone https://github.com/yourusername/RootQuantify.git
+   git clone https://github.com/smiler488/RootQuantify.git
    cd RootQuantify
    ```
 2.**Install Dependencies**
