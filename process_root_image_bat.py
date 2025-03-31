@@ -1,31 +1,51 @@
 import cv2
 import numpy as np
 import os
-# pip install opencv-python numpy
+import shutil
+import ctypes
+
+# Function to get screen resolution on Windows
+def get_screen_resolution():
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetProcessDPIAware()  # For Windows 10/8/7
+        width = user32.GetSystemMetrics(0)
+        height = user32.GetSystemMetrics(1)
+        return width, height
+    except Exception as e:
+        return 1920, 1080  # Fallback resolution
 
 # Set folder paths (modify these paths as needed)
 folder_path = '/Users/liangchaodeng/Documents/VScode/root quantify'  # Folder containing images
-output_folder = 'output'  # Output folder
+output_folder = 'output'  # Folder to save processed ROI images
+processed_folder = os.path.join(folder_path, 'processed_original')  # Folder to move original images after processing
 
-# Create the output folder if it doesn't exist
+# Create output folders if they don't exist
 if not os.path.exists(output_folder):
     os.makedirs(output_folder)
+if not os.path.exists(processed_folder):
+    os.makedirs(processed_folder)
 
-# Get all image files from the folder (supported formats: jpg, jpeg, png, bmp)
-image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
+# Get all image files from the folder (supported formats: jpg, jpeg, png, bmp, tif, tiff)
+image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff']
 image_files = [f for f in os.listdir(folder_path) if os.path.splitext(f)[1].lower() in image_extensions]
 
-# Improved polygon selection function with anti-aliasing
+# Get screen resolution and define window sizes/positions
+screen_width, screen_height = get_screen_resolution()
+left_win_width = screen_width // 2 - 100
+right_win_width = screen_width // 2 - 100
+win_height = screen_height - 100
+# 将窗口上移，将 y 坐标设置为 10，避免靠近屏幕下部
+left_win_pos = (50, 10)
+right_win_pos = (screen_width // 2 + 50, 10)
+# --- ROI Selection Function (Polygon) ---
 def select_polygon(image):
     polygon_points = []
 
-    # Redraw the image with current polygon points
     def redraw(img, points):
         temp_img = img.copy()
         if len(points) > 0:
-            # Draw polylines using anti-aliasing
             cv2.polylines(temp_img, [np.array(points, dtype=np.int32)], False, (255, 0, 0), 2, cv2.LINE_AA)
-            # Draw each point
             for pt in points:
                 cv2.circle(temp_img, pt, 3, (0, 0, 255), -1, cv2.LINE_AA)
         return temp_img
@@ -37,39 +57,39 @@ def select_polygon(image):
         if event == cv2.EVENT_LBUTTONDOWN:
             polygon_points.append((x, y))
             temp_img = redraw(image, polygon_points)
-            cv2.imshow("Select Polygon", temp_img)
+            cv2.imshow("ROI Operations", temp_img)
 
-    cv2.imshow("Select Polygon", temp_img)
-    cv2.setMouseCallback("Select Polygon", click_event)
+    cv2.imshow("ROI Operations", temp_img)
+    cv2.setMouseCallback("ROI Operations", click_event)
 
     while True:
         key = cv2.waitKey(0) & 0xFF
         if key == ord('c'):
             if len(polygon_points) > 2:
-                # Close the polygon for a complete shape
                 cv2.polylines(temp_img, [np.array(polygon_points, dtype=np.int32)], True, (255, 0, 0), 2, cv2.LINE_AA)
-                cv2.imshow("Select Polygon", temp_img)
+                cv2.imshow("ROI Operations", temp_img)
             break
         elif key == ord('r'):
-            # Reset polygon selection
             polygon_points = []
             temp_img = image.copy()
-            cv2.imshow("Select Polygon", temp_img)
-    cv2.destroyWindow("Select Polygon")
+            cv2.imshow("ROI Operations", temp_img)
+    cv2.setMouseCallback("ROI Operations", lambda *args: None)
     return polygon_points
 
-# Manual correction function with adjustable brush size and mouse brush indicator
+# --- Manual Correction Function with Drag and Undo ---
 def manual_correction(image):
     manual_img = image.copy()
     drawing = False
-    mode = 'draw'  # 'draw' adds black, 'erase' adds white
+    mode = 'draw'  # 'draw' for black, 'erase' for white
     brush_size = 5
-    current_color = (0, 0, 0)  # Black for draw mode
+    current_color = (0, 0, 0)
     mouse_pos = None
+    # Undo stack to store history for undo
+    undo_stack = [manual_img.copy()]
 
     def draw_callback(event, x, y, flags, param):
-        nonlocal manual_img, drawing, mode, brush_size, current_color, mouse_pos
-        mouse_pos = (x, y)  # Update current mouse position
+        nonlocal manual_img, drawing, mode, brush_size, current_color, mouse_pos, undo_stack
+        mouse_pos = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
             drawing = True
             cv2.circle(manual_img, (x, y), brush_size, current_color, -1, cv2.LINE_AA)
@@ -78,18 +98,19 @@ def manual_correction(image):
                 cv2.circle(manual_img, (x, y), brush_size, current_color, -1, cv2.LINE_AA)
         elif event == cv2.EVENT_LBUTTONUP:
             drawing = False
+            undo_stack.append(manual_img.copy())
 
-    cv2.namedWindow("Manual Correction")
-    cv2.setMouseCallback("Manual Correction", draw_callback)
+    cv2.namedWindow("ROI Operations", cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback("ROI Operations", draw_callback)
 
     while True:
         temp = manual_img.copy()
-        # Draw a brush size indicator circle at the current mouse position
         if mouse_pos is not None:
             cv2.circle(temp, mouse_pos, brush_size, (0, 255, 0), 1, cv2.LINE_AA)
-        info_text = f"Mode: {mode} (press 'd' for draw, 'e' for erase, '+' to increase, '-' to decrease, 'q' to finish). Brush Size: {brush_size}"
+        info_text = (f"Mode: {mode} (d: draw, e: erase, +: increase, -: decrease, u: undo, q: finish). "
+                     f"Brush Size: {brush_size}")
         cv2.putText(temp, info_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-        cv2.imshow("Manual Correction", temp)
+        cv2.imshow("ROI Operations", temp)
         key = cv2.waitKey(1) & 0xFF
         if key == ord('d'):
             mode = 'draw'
@@ -101,12 +122,16 @@ def manual_correction(image):
             brush_size += 2
         elif key == ord('-'):
             brush_size = max(1, brush_size - 2)
+        elif key == ord('u'):
+            if len(undo_stack) > 1:
+                undo_stack.pop()
+                manual_img = undo_stack[-1].copy()
         elif key == ord('q'):
             break
-    cv2.destroyWindow("Manual Correction")
+    cv2.setMouseCallback("ROI Operations", lambda *args: None)
     return manual_img
 
-# Process each image in the folder
+# --- Main Processing Loop ---
 for idx, file_name in enumerate(image_files):
     image_path = os.path.join(folder_path, file_name)
     img = cv2.imread(image_path)
@@ -114,61 +139,73 @@ for idx, file_name in enumerate(image_files):
         print(f"Unable to read {file_name}, skipping.")
         continue
 
-    # For each image, require user to select a polygon ROI
-    print(f"Processing {file_name}: Please click to select polygon vertices. Press 'c' to confirm, 'r' to reset.")
+    # --- Left Window: Display Original Image with Name ---
+    original_preview = img.copy()
+    cv2.putText(original_preview, f"Image: {file_name}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+    cv2.namedWindow("Original Image", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Original Image", left_win_width, win_height)
+    cv2.imshow("Original Image", original_preview)
+    cv2.moveWindow("Original Image", left_win_pos[0], left_win_pos[1])
+
+    # --- Right Window: ROI Operations ---
+    cv2.namedWindow("ROI Operations", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("ROI Operations", right_win_width, win_height)
+    cv2.moveWindow("ROI Operations", right_win_pos[0], right_win_pos[1])
+
+    print(f"Processing image: {file_name}")
+    print("Right window: Please click to select polygon vertices. Press 'c' to confirm, 'r' to reset.")
     points = select_polygon(img)
     if len(points) < 3:
         print(f"Not enough points selected for {file_name}, skipping.")
+        cv2.destroyWindow("ROI Operations")
+        cv2.destroyWindow("Original Image")
         continue
 
-    # Create a polygon mask
+    # Create polygon mask
     mask = np.zeros(img.shape[:2], dtype=np.uint8)
     pts = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
     cv2.fillPoly(mask, [pts], 255)
 
-    # Get the bounding rectangle of the polygon
+    # Extract ROI from bounding rectangle of polygon
     x, y, w, h = cv2.boundingRect(pts)
     roi_img = img[y:y+h, x:x+w]
     roi_mask = mask[y:y+h, x:x+w]
 
-    # Convert the ROI to grayscale
+    # Digital image processing on ROI
     gray_roi = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-
-    # Estimate background using morphological closing (adjust kernel_size as needed)
-    kernel_size = 50  
+    kernel_size = 50  # Adjust as needed
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
     background = cv2.morphologyEx(gray_roi, cv2.MORPH_CLOSE, kernel)
-
-    # Subtract the background from the grayscale ROI to reduce shadows
     diff = cv2.subtract(background, gray_roi)
-
-    # Normalize the difference image to 0-255 for further processing
     norm_diff = cv2.normalize(diff, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-
-    # Apply thresholding to remove weak shadows (adjust threshold as needed)
     _, thresh = cv2.threshold(norm_diff, 30, 255, cv2.THRESH_BINARY)
-
-    # Invert the image so that roots are black and background is white
     inverted = cv2.bitwise_not(thresh)
-
-    # Convert the processed ROI to BGR (for merging with the original image)
     processed_roi = cv2.cvtColor(inverted, cv2.COLOR_GRAY2BGR)
-
-    # Set areas outside the polygon to white
     processed_roi[roi_mask == 0] = [255, 255, 255]
 
-    # Allow manual correction before previewing
+    # Briefly display processed ROI in right window before manual correction
+    cv2.imshow("ROI Operations", processed_roi)
+    cv2.waitKey(500)
+
+    print("Right window: Now perform manual correction (d: draw, e: erase, + / -: adjust, u: undo, q: finish).")
     corrected_roi = manual_correction(processed_roi)
 
-    # Preview the corrected ROI; press any key to proceed to the next image
-    cv2.imshow("Processed ROI Preview", corrected_roi)
+    # Final preview in right window
+    cv2.imshow("ROI Operations", corrected_roi)
     print("Press any key to continue to the next image.")
     cv2.waitKey(0)
-    cv2.destroyWindow("Processed ROI Preview")
 
-    # Save the corrected ROI image with the filename "processed-" + original filename
+    # Save processed ROI image
     output_file = os.path.join(output_folder, "processed-" + file_name)
     cv2.imwrite(output_file, corrected_roi)
-    print(f"Saved {output_file}")
+    print(f"Saved processed image to {output_file}")
+
+    # Move original image to processed_folder
+    shutil.move(image_path, os.path.join(processed_folder, file_name))
+    print(f"Moved original image {file_name} to {processed_folder}")
+
+    cv2.destroyWindow("ROI Operations")
+    cv2.destroyWindow("Original Image")
 
 print("Batch processing completed!")
