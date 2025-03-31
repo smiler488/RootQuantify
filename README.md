@@ -43,9 +43,9 @@ When the program starts, a folder selection dialog will appear. Choose the folde
 3.**Dual-Window Workflow**
 
 - Left Window (“Original Image”):Displays the original image along with its filename.
-- ROI Selection:Click in the right window to select polygon vertices that define your ROI.Press c to confirm the selection, or press r to reset.
+- ROI Selection:Click in the right window to select polygon vertices that define your ROI.Press `c` to confirm the selection, or press `r` to reset.
 - Automatic Processing:Once confirmed, the selected ROI is processed (background estimation, shadow removal, thresholding, inversion) so that roots appear black on a white background.
-- Manual Correction:The right window then enters manual correction mode. You can:Press d to switch to draw mode (black).Press e to switch to erase mode (white).Use + or - to adjust the brush size (a green circle indicates the current brush size at the mouse pointer).Press u to undo the last operation.Press q to finish manual correction.
+- Manual Correction:The right window then enters manual correction mode. You can:Press `d` to switch to draw mode (black).Press `e `to switch to erase mode (white).Use `+` or `-` to adjust the brush size (a green circle indicates the current brush size at the mouse pointer).Press `u` to undo the last operation.Press `q` to finish manual correction.
 - 5Once manual correction is complete, press any key to proceed to the next image.
 
 4.**Output and Archiving**
