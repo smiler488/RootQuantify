@@ -91,19 +91,43 @@ def segment_roots(roi_bgr, roi_mask=None, kernel_size=50, threshold=30):
     return binary
 
 
+def _zhang_suen(mask):
+    """Zhang-Suen thinning in NumPy (same algorithm as cv2.ximgproc.thinning).
+
+    Gives a connected, one-pixel-wide skeleton without opencv-contrib.
+    """
+    img = np.pad(mask.astype(np.uint8), 1)
+    while True:
+        changed = False
+        for step in (0, 1):
+            p2 = img[:-2, 1:-1]; p3 = img[:-2, 2:]; p4 = img[1:-1, 2:]; p5 = img[2:, 2:]
+            p6 = img[2:, 1:-1]; p7 = img[2:, :-2]; p8 = img[1:-1, :-2]; p9 = img[:-2, :-2]
+            ring = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
+            b = sum(ring[:8])                                              # neighbours set
+            a = sum(((ring[k] == 0) & (ring[k + 1] == 1)).astype(np.uint8)  # 0->1 transitions
+                    for k in range(8))
+            if step == 0:
+                c, d = p2 * p4 * p6, p4 * p6 * p8
+            else:
+                c, d = p2 * p4 * p8, p2 * p6 * p8
+            remove = (img[1:-1, 1:-1] == 1) & (b >= 2) & (b <= 6) & (a == 1) & (c == 0) & (d == 0)
+            if remove.any():
+                img[1:-1, 1:-1][remove] = 0
+                changed = True
+        if not changed:
+            return img[1:-1, 1:-1].astype(bool)
+
+
 def skeletonize(mask):
-    """Morphological skeleton of a boolean mask (OpenCV only, no extra deps)."""
+    """One-pixel-wide skeleton of a boolean mask.
+
+    Uses cv2.ximgproc.thinning when opencv-contrib is installed and an
+    equivalent NumPy implementation otherwise, so the measured length does
+    not depend on which OpenCV wheel is installed.
+    """
     if hasattr(cv2, "ximgproc"):
         return cv2.ximgproc.thinning(mask.astype(np.uint8) * 255) > 0
-    img = mask.astype(np.uint8) * 255
-    skel = np.zeros_like(img)
-    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-    while cv2.countNonZero(img):
-        eroded = cv2.erode(img, element)
-        opened = cv2.dilate(eroded, element)
-        skel |= cv2.subtract(img, opened)
-        img = eroded
-    return skel > 0
+    return _zhang_suen(mask)
 
 
 def skeleton_length(skel):

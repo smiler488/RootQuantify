@@ -60,3 +60,15 @@ def test_dust_is_ignored():
     cv2.line(img, (20, 150), (280, 150), 0, 3)
     cv2.circle(img, (50, 50), 1, 0, -1)
     assert R.measure_roots(img)["objects"] == 1
+
+
+def test_numpy_thinning_matches_expected_lengths(monkeypatch):
+    """Without opencv-contrib the NumPy Zhang-Suen path must give the same accuracy."""
+    monkeypatch.delattr(cv2, "ximgproc", raising=False)
+    img = blank()
+    cv2.line(img, (20, 250), (280, 100), 0, 3)
+    true = np.hypot(260, 150)
+    assert abs(length_of(img) - true) / true < 0.04
+    skel = R.skeletonize(img < 128)
+    # one pixel wide: no 2x2 block is completely filled
+    assert not (skel[:-1, :-1] & skel[1:, :-1] & skel[:-1, 1:] & skel[1:, 1:]).any()
