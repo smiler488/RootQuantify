@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "RootQuantify: semi-automatic segmentation and measurement of root scans"
+type: software
+authors:
+  - family-names: Deng
+    given-names: Liangchao
+repository-code: "https://github.com/smiler488/RootQuantify"
+license: MIT
+date-released: "2025-03-31"
+keywords:
+  - root phenotyping
+  - image analysis
+  - root length
