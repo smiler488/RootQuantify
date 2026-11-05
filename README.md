@@ -4,7 +4,7 @@ English | [中文](README.zh-CN.md)
 
 A small OpenCV tool for washed-root scans. For each image you outline the roots, the region is segmented automatically, you touch up the mask with a brush, and the tool saves the clean binary image and measures total root length, projected area, mean diameter and number of tips.
 
-I wrote it because the automatic thresholds in commercial root software kept picking up soil particles, tray edges and labels in my scans, and fixing those afterwards took longer than drawing the region by hand. The semi-automatic route turned out faster for a few hundred images.
+Fully automatic thresholds tend to pick up soil particles, tray edges and labels along with the roots. Outlining the region first and touching up the mask afterwards keeps that clutter out of the measurements.
 
 ## Installation
 
