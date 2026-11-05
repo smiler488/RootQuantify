@@ -1,211 +1,377 @@
+"""
+RootQuantify - semi-automatic segmentation and measurement of root scans.
+
+For each image in a folder:
+1. outline the root region with a polygon (right window, original on the left);
+2. the region is segmented automatically: background estimated by a
+   morphological closing, subtracted, normalised and thresholded, so roots
+   come out black on white;
+3. fix the mask by hand with a brush (draw / erase / undo);
+4. the mask is saved and root traits are measured: projected area, total
+   length (skeleton, Kimura et al. 1999), mean diameter and tip count.
+
+All traits go to ``root_traits.csv`` in the output folder. Give ``--dpi`` to
+get millimetres instead of pixels.
+
+Keys
+----
+ROI window:        left click = add vertex, c = confirm, r = reset, s = skip image, Esc = quit
+Correction window: d = draw (root), e = erase, + / - = brush size, u = undo, q = finish
+
+Author: Liangchao Deng (邓良超)
+License: MIT
+"""
+
+import argparse
+import csv
+import shutil
+import sys
+from pathlib import Path
+
 import cv2
 import numpy as np
-import os
-import shutil
-import ctypes
 
-# Function to get screen resolution on Windows
-def get_screen_resolution():
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+WIN_ORIG = "Original image"
+WIN_ROI = "ROI operations"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def screen_size():
+    """Screen size in pixels via Tk (works on Windows, macOS and Linux)."""
     try:
-        user32 = ctypes.windll.user32
-        user32.SetProcessDPIAware()  # For Windows 10/8/7
-        width = user32.GetSystemMetrics(0)
-        height = user32.GetSystemMetrics(1)
-        return width, height
-    except Exception as e:
-        return 1920, 1080  # Fallback resolution
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        size = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.destroy()
+        return size
+    except Exception:
+        return 1920, 1080
 
-# Set folder paths (modify these paths as needed)
-folder_path = '/Users/liangchaodeng/Documents/VScode/root quantify'  # Folder containing images
-output_folder = 'output'  # Folder to save processed ROI images
-processed_folder = os.path.join(folder_path, 'processed_original')  # Folder to move original images after processing
 
-# Create output folders if they don't exist
-if not os.path.exists(output_folder):
-    os.makedirs(output_folder)
-if not os.path.exists(processed_folder):
-    os.makedirs(processed_folder)
+def ask_folder():
+    """Folder picker; returns None when cancelled or Tk is unavailable."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        path = filedialog.askdirectory(title="Select the folder with root images")
+        root.destroy()
+        return Path(path) if path else None
+    except Exception:
+        return None
 
-# Get all image files from the folder (supported formats: jpg, jpeg, png, bmp, tif, tiff)
-image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff']
-image_files = [f for f in os.listdir(folder_path) if os.path.splitext(f)[1].lower() in image_extensions]
 
-# Get screen resolution and define window sizes/positions
-screen_width, screen_height = get_screen_resolution()
-left_win_width = screen_width // 2 - 100
-right_win_width = screen_width // 2 - 100
-win_height = screen_height - 100
-# 将窗口上移，将 y 坐标设置为 10，避免靠近屏幕下部
-left_win_pos = (50, 10)
-right_win_pos = (screen_width // 2 + 50, 10)
-# --- ROI Selection Function (Polygon) ---
-def select_polygon(image):
-    polygon_points = []
+# ---------------------------------------------------------------------------
+# Image processing (no GUI, can be imported and tested)
+# ---------------------------------------------------------------------------
 
-    def redraw(img, points):
-        temp_img = img.copy()
-        if len(points) > 0:
-            cv2.polylines(temp_img, [np.array(points, dtype=np.int32)], False, (255, 0, 0), 2, cv2.LINE_AA)
-            for pt in points:
-                cv2.circle(temp_img, pt, 3, (0, 0, 255), -1, cv2.LINE_AA)
-        return temp_img
+def segment_roots(roi_bgr, roi_mask=None, kernel_size=50, threshold=30):
+    """Binary root image of a region: roots 0 (black), background 255 (white).
 
-    temp_img = image.copy()
-
-    def click_event(event, x, y, flags, param):
-        nonlocal polygon_points, temp_img
-        if event == cv2.EVENT_LBUTTONDOWN:
-            polygon_points.append((x, y))
-            temp_img = redraw(image, polygon_points)
-            cv2.imshow("ROI Operations", temp_img)
-
-    cv2.imshow("ROI Operations", temp_img)
-    cv2.setMouseCallback("ROI Operations", click_event)
-
-    while True:
-        key = cv2.waitKey(0) & 0xFF
-        if key == ord('c'):
-            if len(polygon_points) > 2:
-                cv2.polylines(temp_img, [np.array(polygon_points, dtype=np.int32)], True, (255, 0, 0), 2, cv2.LINE_AA)
-                cv2.imshow("ROI Operations", temp_img)
-            break
-        elif key == ord('r'):
-            polygon_points = []
-            temp_img = image.copy()
-            cv2.imshow("ROI Operations", temp_img)
-    cv2.setMouseCallback("ROI Operations", lambda *args: None)
-    return polygon_points
-
-# --- Manual Correction Function with Drag and Undo ---
-def manual_correction(image):
-    manual_img = image.copy()
-    drawing = False
-    mode = 'draw'  # 'draw' for black, 'erase' for white
-    brush_size = 5
-    current_color = (0, 0, 0)
-    mouse_pos = None
-    # Undo stack to store history for undo
-    undo_stack = [manual_img.copy()]
-
-    def draw_callback(event, x, y, flags, param):
-        nonlocal manual_img, drawing, mode, brush_size, current_color, mouse_pos, undo_stack
-        mouse_pos = (x, y)
-        if event == cv2.EVENT_LBUTTONDOWN:
-            drawing = True
-            cv2.circle(manual_img, (x, y), brush_size, current_color, -1, cv2.LINE_AA)
-        elif event == cv2.EVENT_MOUSEMOVE:
-            if drawing:
-                cv2.circle(manual_img, (x, y), brush_size, current_color, -1, cv2.LINE_AA)
-        elif event == cv2.EVENT_LBUTTONUP:
-            drawing = False
-            undo_stack.append(manual_img.copy())
-
-    cv2.namedWindow("ROI Operations", cv2.WINDOW_NORMAL)
-    cv2.setMouseCallback("ROI Operations", draw_callback)
-
-    while True:
-        temp = manual_img.copy()
-        if mouse_pos is not None:
-            cv2.circle(temp, mouse_pos, brush_size, (0, 255, 0), 1, cv2.LINE_AA)
-        info_text = (f"Mode: {mode} (d: draw, e: erase, +: increase, -: decrease, u: undo, q: finish). "
-                     f"Brush Size: {brush_size}")
-        cv2.putText(temp, info_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-        cv2.imshow("ROI Operations", temp)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('d'):
-            mode = 'draw'
-            current_color = (0, 0, 0)
-        elif key == ord('e'):
-            mode = 'erase'
-            current_color = (255, 255, 255)
-        elif key == ord('+') or key == ord('='):
-            brush_size += 2
-        elif key == ord('-'):
-            brush_size = max(1, brush_size - 2)
-        elif key == ord('u'):
-            if len(undo_stack) > 1:
-                undo_stack.pop()
-                manual_img = undo_stack[-1].copy()
-        elif key == ord('q'):
-            break
-    cv2.setMouseCallback("ROI Operations", lambda *args: None)
-    return manual_img
-
-# --- Main Processing Loop ---
-for idx, file_name in enumerate(image_files):
-    image_path = os.path.join(folder_path, file_name)
-    img = cv2.imread(image_path)
-    if img is None:
-        print(f"Unable to read {file_name}, skipping.")
-        continue
-
-    # --- Left Window: Display Original Image with Name ---
-    original_preview = img.copy()
-    cv2.putText(original_preview, f"Image: {file_name}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
-    cv2.namedWindow("Original Image", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Original Image", left_win_width, win_height)
-    cv2.imshow("Original Image", original_preview)
-    cv2.moveWindow("Original Image", left_win_pos[0], left_win_pos[1])
-
-    # --- Right Window: ROI Operations ---
-    cv2.namedWindow("ROI Operations", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("ROI Operations", right_win_width, win_height)
-    cv2.moveWindow("ROI Operations", right_win_pos[0], right_win_pos[1])
-
-    print(f"Processing image: {file_name}")
-    print("Right window: Please click to select polygon vertices. Press 'c' to confirm, 'r' to reset.")
-    points = select_polygon(img)
-    if len(points) < 3:
-        print(f"Not enough points selected for {file_name}, skipping.")
-        cv2.destroyWindow("ROI Operations")
-        cv2.destroyWindow("Original Image")
-        continue
-
-    # Create polygon mask
-    mask = np.zeros(img.shape[:2], dtype=np.uint8)
-    pts = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
-    cv2.fillPoly(mask, [pts], 255)
-
-    # Extract ROI from bounding rectangle of polygon
-    x, y, w, h = cv2.boundingRect(pts)
-    roi_img = img[y:y+h, x:x+w]
-    roi_mask = mask[y:y+h, x:x+w]
-
-    # Digital image processing on ROI
-    gray_roi = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
-    kernel_size = 50  # Adjust as needed
+    The background is estimated with a grey-level closing (roots are darker
+    than the background and thinner than ``kernel_size``), subtracted from
+    the image, stretched to 0-255 and thresholded at ``threshold``.
+    Pixels outside ``roi_mask`` are set to background.
+    """
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-    background = cv2.morphologyEx(gray_roi, cv2.MORPH_CLOSE, kernel)
-    diff = cv2.subtract(background, gray_roi)
-    norm_diff = cv2.normalize(diff, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-    _, thresh = cv2.threshold(norm_diff, 30, 255, cv2.THRESH_BINARY)
-    inverted = cv2.bitwise_not(thresh)
-    processed_roi = cv2.cvtColor(inverted, cv2.COLOR_GRAY2BGR)
-    processed_roi[roi_mask == 0] = [255, 255, 255]
+    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    diff = cv2.subtract(background, gray)
+    norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
+    _, roots = cv2.threshold(norm, threshold, 255, cv2.THRESH_BINARY)
+    binary = cv2.bitwise_not(roots)
+    if roi_mask is not None:
+        binary[roi_mask == 0] = 255
+    return binary
 
-    # Briefly display processed ROI in right window before manual correction
-    cv2.imshow("ROI Operations", processed_roi)
-    cv2.waitKey(500)
 
-    print("Right window: Now perform manual correction (d: draw, e: erase, + / -: adjust, u: undo, q: finish).")
-    corrected_roi = manual_correction(processed_roi)
+def _zhang_suen(mask):
+    """Zhang-Suen thinning in NumPy (same algorithm as cv2.ximgproc.thinning).
 
-    # Final preview in right window
-    cv2.imshow("ROI Operations", corrected_roi)
-    print("Press any key to continue to the next image.")
-    cv2.waitKey(0)
+    Gives a connected, one-pixel-wide skeleton without opencv-contrib.
+    """
+    img = np.pad(mask.astype(np.uint8), 1)
+    while True:
+        changed = False
+        for step in (0, 1):
+            p2 = img[:-2, 1:-1]; p3 = img[:-2, 2:]; p4 = img[1:-1, 2:]; p5 = img[2:, 2:]
+            p6 = img[2:, 1:-1]; p7 = img[2:, :-2]; p8 = img[1:-1, :-2]; p9 = img[:-2, :-2]
+            ring = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
+            b = sum(ring[:8])                                              # neighbours set
+            a = sum(((ring[k] == 0) & (ring[k + 1] == 1)).astype(np.uint8)  # 0->1 transitions
+                    for k in range(8))
+            if step == 0:
+                c, d = p2 * p4 * p6, p4 * p6 * p8
+            else:
+                c, d = p2 * p4 * p8, p2 * p6 * p8
+            remove = (img[1:-1, 1:-1] == 1) & (b >= 2) & (b <= 6) & (a == 1) & (c == 0) & (d == 0)
+            if remove.any():
+                img[1:-1, 1:-1][remove] = 0
+                changed = True
+        if not changed:
+            return img[1:-1, 1:-1].astype(bool)
 
-    # Save processed ROI image
-    output_file = os.path.join(output_folder, "processed-" + file_name)
-    cv2.imwrite(output_file, corrected_roi)
-    print(f"Saved processed image to {output_file}")
 
-    # Move original image to processed_folder
-    shutil.move(image_path, os.path.join(processed_folder, file_name))
-    print(f"Moved original image {file_name} to {processed_folder}")
+def skeletonize(mask):
+    """One-pixel-wide skeleton of a boolean mask.
 
-    cv2.destroyWindow("ROI Operations")
-    cv2.destroyWindow("Original Image")
+    Uses cv2.ximgproc.thinning when opencv-contrib is installed and an
+    equivalent NumPy implementation otherwise, so the measured length does
+    not depend on which OpenCV wheel is installed.
+    """
+    if hasattr(cv2, "ximgproc"):
+        return cv2.ximgproc.thinning(mask.astype(np.uint8) * 255) > 0
+    return _zhang_suen(mask)
 
-print("Batch processing completed!")
+
+def skeleton_length(skel):
+    """Root length in pixels from a one-pixel skeleton (Kimura et al., 1999).
+
+    No = number of horizontal / vertical neighbour pairs, Nd = number of
+    diagonal pairs. A diagonal pair is only counted when neither pixel that
+    would join it orthogonally is set, so staircase corners are not counted
+    twice. Length = sqrt(Nd^2 + (Nd + No/2)^2) + No/2, which is exact for
+    0 and 45 degree lines and within a few per cent for curved roots.
+
+    Kimura, K., Kikuchi, S. & Yamasaki, S. (1999). Accurate root length
+    measurement by image analysis. Plant and Soil, 216, 117-127.
+    """
+    s = np.pad(skel.astype(bool), 1)
+    n_o = np.count_nonzero(s[:, :-1] & s[:, 1:]) + np.count_nonzero(s[:-1, :] & s[1:, :])
+    a, b = s[:-1, :-1], s[1:, 1:]        # down-right pair
+    c, d = s[:-1, 1:], s[1:, :-1]        # down-left pair
+    n_d = (np.count_nonzero(a & b & ~c & ~d) +
+           np.count_nonzero(c & d & ~a & ~b))
+    return float(np.sqrt(n_d ** 2 + (n_d + n_o / 2.0) ** 2) + n_o / 2.0)
+
+
+def count_tips(skel):
+    """Skeleton end points (pixels with exactly one 8-neighbour)."""
+    s = skel.astype(np.uint8)
+    neighbours = cv2.filter2D(s, -1, np.ones((3, 3), np.float32), borderType=cv2.BORDER_CONSTANT) - s
+    return int(np.count_nonzero((s == 1) & (neighbours == 1)))
+
+
+def measure_roots(binary, dpi=None, min_object_px=20):
+    """Root traits from a binary image (roots black).
+
+    Objects smaller than ``min_object_px`` pixels are ignored as dust.
+    With ``dpi`` the lengths are in mm and the area in mm^2, otherwise in pixels.
+    """
+    roots = (binary < 128).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(roots, connectivity=8)
+    keep = np.zeros(n, bool)
+    keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_object_px
+    roots = keep[labels]
+
+    area_px = int(roots.sum())
+    skel = skeletonize(roots)
+    length_px = float(skeleton_length(skel))
+    tips = count_tips(skel)
+    # mean diameter = area / length (cylinder seen from the side)
+    diameter_px = area_px / length_px if length_px > 0 else 0.0
+
+    scale = 25.4 / dpi if dpi else 1.0
+    unit = "mm" if dpi else "px"
+    return {
+        f"area_{unit}2": area_px * scale ** 2,
+        f"length_{unit}": length_px * scale,
+        f"mean_diameter_{unit}": diameter_px * scale,
+        "tips": tips,
+        "objects": int(keep.sum()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Interactive steps
+# ---------------------------------------------------------------------------
+
+def select_polygon(image):
+    """Collect polygon vertices in the ROI window.
+
+    Returns the list of points, [] to skip this image, or None to quit.
+    """
+    points = []
+    view = image.copy()
+
+    def redraw():
+        nonlocal view
+        view = image.copy()
+        if points:
+            cv2.polylines(view, [np.array(points, np.int32)], False, (255, 0, 0), 2, cv2.LINE_AA)
+            for pt in points:
+                cv2.circle(view, pt, 3, (0, 0, 255), -1, cv2.LINE_AA)
+        cv2.imshow(WIN_ROI, view)
+
+    def on_click(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append((x, y))
+            redraw()
+
+    cv2.imshow(WIN_ROI, view)
+    cv2.setMouseCallback(WIN_ROI, on_click)
+    try:
+        while True:
+            key = cv2.waitKey(0) & 0xFF
+            if key == ord("c"):
+                if len(points) >= 3:
+                    return points
+                print("  need at least 3 vertices")
+            elif key == ord("r"):
+                points.clear()
+                redraw()
+            elif key == ord("s"):
+                return []
+            elif key == 27:  # Esc
+                return None
+    finally:
+        cv2.setMouseCallback(WIN_ROI, lambda *a: None)
+
+
+def manual_correction(image, brush_size=5):
+    """Brush editing of the binary image. d = draw roots, e = erase, u = undo, q = done."""
+    canvas = image.copy()
+    state = {"drawing": False, "color": (0, 0, 0), "mode": "draw", "brush": brush_size, "pos": None}
+    undo = [canvas.copy()]
+
+    def on_mouse(event, x, y, flags, param):
+        state["pos"] = (x, y)
+        if event == cv2.EVENT_LBUTTONDOWN:
+            state["drawing"] = True
+        if state["drawing"] and event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_MOUSEMOVE):
+            cv2.circle(canvas, (x, y), state["brush"], state["color"], -1, cv2.LINE_AA)
+        elif event == cv2.EVENT_LBUTTONUP and state["drawing"]:
+            state["drawing"] = False
+            undo.append(canvas.copy())
+
+    cv2.setMouseCallback(WIN_ROI, on_mouse)
+    while True:
+        view = canvas.copy()
+        if state["pos"] is not None:
+            cv2.circle(view, state["pos"], state["brush"], (0, 255, 0), 1, cv2.LINE_AA)
+        cv2.putText(view, f"{state['mode']} | brush {state['brush']} | d/e/+/-/u, q = done",
+                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.imshow(WIN_ROI, view)
+        key = cv2.waitKey(15) & 0xFF
+        if key == ord("d"):
+            state.update(mode="draw", color=(0, 0, 0))
+        elif key == ord("e"):
+            state.update(mode="erase", color=(255, 255, 255))
+        elif key in (ord("+"), ord("=")):
+            state["brush"] += 2
+        elif key == ord("-"):
+            state["brush"] = max(1, state["brush"] - 2)
+        elif key == ord("u") and len(undo) > 1:
+            undo.pop()
+            canvas = undo[-1].copy()
+        elif key == ord("q"):
+            break
+    cv2.setMouseCallback(WIN_ROI, lambda *a: None)
+    return canvas
+
+
+# ---------------------------------------------------------------------------
+# Batch loop
+# ---------------------------------------------------------------------------
+
+def append_row(csv_path, row):
+    new = not csv_path.exists()
+    with open(csv_path, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(row.keys()))
+        if new:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def process_folder(folder, out_dir=None, dpi=None, kernel_size=50, threshold=30,
+                   move_originals=True):
+    folder = Path(folder)
+    out_dir = Path(out_dir) if out_dir else folder / "output"
+    done_dir = folder / "processed_original"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / "root_traits.csv"
+
+    files = sorted(p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
+    if not files:
+        print(f"No images found in {folder}")
+        return
+
+    sw, sh = screen_size()
+    win_w, win_h = sw // 2 - 100, sh - 100
+
+    for i, path in enumerate(files, 1):
+        img = cv2.imread(str(path))
+        if img is None:
+            print(f"Cannot read {path.name}, skipped.")
+            continue
+        print(f"[{i}/{len(files)}] {path.name}: click the outline, c = confirm, r = reset, s = skip, Esc = quit")
+
+        preview = img.copy()
+        cv2.putText(preview, path.name, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+        for name, x in ((WIN_ORIG, 50), (WIN_ROI, sw // 2 + 50)):
+            cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(name, win_w, win_h)
+            cv2.moveWindow(name, x, 10)
+        cv2.imshow(WIN_ORIG, preview)
+
+        points = select_polygon(img)
+        if points is None:
+            print("Stopped by user.")
+            break
+        if not points:
+            print("  skipped")
+            continue
+
+        poly = np.array(points, np.int32).reshape(-1, 1, 2)
+        mask = np.zeros(img.shape[:2], np.uint8)
+        cv2.fillPoly(mask, [poly], 255)
+        x, y, w, h = cv2.boundingRect(poly)
+        binary = segment_roots(img[y:y + h, x:x + w], mask[y:y + h, x:x + w], kernel_size, threshold)
+
+        print("  correct the mask: d = draw, e = erase, +/- = brush, u = undo, q = done")
+        corrected = manual_correction(cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR))
+        corrected_gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
+
+        out_file = out_dir / f"processed-{path.name}"
+        cv2.imwrite(str(out_file), corrected_gray)
+        traits = measure_roots(corrected_gray, dpi=dpi)
+        append_row(csv_path, {"image": path.name, **traits})
+        print(f"  saved {out_file.name}; " + ", ".join(f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}"
+                                                     for k, v in traits.items()))
+
+        if move_originals:
+            done_dir.mkdir(exist_ok=True)
+            shutil.move(str(path), str(done_dir / path.name))
+
+    cv2.destroyAllWindows()
+    print(f"Done. Traits in {csv_path}")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Segment and measure root images, one folder at a time.")
+    ap.add_argument("folder", nargs="?", help="folder with images (a dialog opens if omitted)")
+    ap.add_argument("-o", "--out", help="output folder (default: <folder>/output)")
+    ap.add_argument("--dpi", type=float, help="scan resolution; report mm instead of pixels")
+    ap.add_argument("--kernel", type=int, default=50,
+                    help="background kernel size in px, larger than the thickest root (default: 50)")
+    ap.add_argument("--threshold", type=int, default=30,
+                    help="threshold on the normalised difference image, 0-255 (default: 30)")
+    ap.add_argument("--keep-originals", action="store_true",
+                    help="do not move finished images to processed_original/")
+    args = ap.parse_args(argv)
+
+    folder = Path(args.folder) if args.folder else ask_folder()
+    if folder is None or not folder.is_dir():
+        sys.exit("No valid image folder given.")
+    process_folder(folder, args.out, args.dpi, args.kernel, args.threshold,
+                   move_originals=not args.keep_originals)
+
+
+if __name__ == "__main__":
+    main()
