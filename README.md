@@ -2,6 +2,7 @@
 
 English | [中文](README.zh-CN.md)
 
+[![CI](https://github.com/smiler488/RootQuantify/actions/workflows/test.yml/badge.svg)](https://github.com/smiler488/RootQuantify/actions/workflows/test.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![Python 3.9+](https://img.shields.io/badge/Python_3.9%2B-informational)
 A small OpenCV tool for washed-root scans. For each image you outline the roots, the region is segmented automatically, you touch up the mask with a brush, and the tool saves the clean binary image and measures total root length, projected area, mean diameter and number of tips.
 
 Fully automatic thresholds tend to pick up soil particles, tray edges and labels along with the roots. Outlining the region first and touching up the mask afterwards keeps that clutter out of the measurements.

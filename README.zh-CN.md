@@ -2,6 +2,7 @@
 
 [English](README.md) | 中文
 
+[![CI](https://github.com/smiler488/RootQuantify/actions/workflows/test.yml/badge.svg)](https://github.com/smiler488/RootQuantify/actions/workflows/test.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![Python 3.9+](https://img.shields.io/badge/Python_3.9%2B-informational)
 一个基于 OpenCV 的小工具，处理洗根后的根系扫描图。每张图的流程是：手动圈出根系范围 → 自动分割 → 用画笔修正掩膜 → 保存干净的二值图，并测量总根长、投影面积、平均直径和根尖数。
 
 全自动阈值很容易把土粒、托盘边缘和标签连同根系一起识别进来。先圈定范围、最后再手动修一下掩膜，就能把这些杂物挡在测量结果之外。
